@@ -1,3 +1,4 @@
+## load libraries
 library(tidyverse)
 library(tidymodels)
 library(vroom)
@@ -7,61 +8,61 @@ library(ggplot2)
 library(car)
 library(corrplot)
 library(ggcorrplot)
+
+## read in the data
 bikeshare <- vroom("GItHub/KaggleBikeShare/train.csv")
 test <- vroom("GItHub/KaggleBikeShare/test.csv")
+head(bikeshare)
+
+## data wrangling
 bikeshare <- bikeshare |>
-  mutate(season = as.factor(season), holiday = as.factor(holiday), workingday = as.factor(workingday), weather = as.factor(weather))
-glimpse(bikeshare)
+  select(-c(casual,registered))|>
+  mutate(season = as.factor(season), holiday = as.factor(holiday), workingday = as.factor(workingday), count = log(count))
 test <- test|>
-  mutate(season = as.factor(season), holiday = as.factor(holiday), workingday = as.factor(workingday), weather = as.factor(weather))
-glimpse(bikeshare)
+  mutate(season = as.factor(season), holiday = as.factor(holiday), workingday = as.factor(workingday))
+head(bikeshare)
 
-plot1 <- ggplot(bikeshare, aes(x = windspeed, y = count, color = weather)) +
-  geom_smooth()+
-  geom_point()
+## feature engineering
+bikeshare <- bikeshare |>
+  mutate(weather = ifelse(weather == 4, 3, weather), weather = as.factor(weather), hour = hour(datetime), sunny = ifelse(weather == 1 & 5 <= hour & hour <= 20, 1, 0), sunny = as.factor(sunny))
+test <- test|>
+  mutate(weather = ifelse(weather == 4, 3, weather), weather = as.factor(weather), hour = hour(datetime), sunny = ifelse(weather == 1 & 5 <= hour & hour <= 20, 1, 0), sunny = as.factor(sunny))
+head(bikeshare)
 
-plot2 <- ggplot(bikeshare, aes(x = count, color = weather)) +
-  geom_boxplot()
+bikeshare <- bikeshare %>%
+  mutate(hour_sin = sin(2 * pi * hour / 24),
+         hour_cos = cos(2 * pi * hour / 24))|>
+  select(-hour)
+test <- test %>%
+  mutate(hour_sin = sin(2 * pi * hour / 24),
+         hour_cos = cos(2 * pi * hour / 24))|>
+  select(-hour)
 
-plot3 <- ggplot(bikeshare, aes(y = count, color = workingday)) +
-  geom_bar()
 
-plot4 <- ggplot(bikeshare, aes(y = count, x = temp))+
-  geom_point()+
-  geom_smooth()
+bikeshare_lm <- lm(count ~ temp + I(temp^2) + humidity + windspeed + season + weather + hour_sin + hour_cos, bikeshare)
+vif(bikeshare_lm)
+plot(bikeshare_lm)
 
-(plot1 + plot2) / (plot3 + plot4)
-VIFS(bikeshare)
-lm <- lm(count~., bikeshare)
-vif(lm)
-plot(lm)
-ggcorrplot(bikeshare)
-interaction.plot(bikeshare$humidity, bikeshare$weather, bikeshare$count)
-ggplot(bikeshare, aes(x = windspeed, y = count, color = workingday))+
+ggplot(bikeshare, aes(x = temp, y = count, color = cut(humidity, breaks = c(-100, 30, 60, 1000), labels = c("low", "med", "high"))))+
   geom_smooth(method = "lm", se = FALSE)
 ggplot(bikeshare, aes(y = count, color = workingday))+
     geom_boxplot()
 
 
-library(tidymodels)
-## Setup and Fit the Linear Regression Model
-my_linear_model <- linear_reg() %>% #Type of model
-  set_engine("lm") %>% # Engine = What R function to use
-  set_mode("regression") %>% # Regression just means quantitative response
-  fit(formula=log(count)~datetime+humidity*season+windspeed*holiday+weather+temp, data=bikeshare)
+## Generate predictions on original scale
+bike_predictions <- predict(bikeshare_lm, newdata = test)
+bike_predictions <- exp(bike_predictions)  # back-transform
+bike_predictions <- pmax(0, bike_predictions)  # ensure non-negative
 
-## Generate Predictions Using Linear Model
-bike_predictions <- predict(my_linear_model,
-new_data=test) # Use fit to predict11
-bike_predictions ## Look at the output
+## Create submission
+kaggle_submission <- bind_cols(
+  test %>% select(datetime),
+  tibble(count = bike_predictions)  # bind vector as column
+) %>%
+  mutate(datetime = as.character(format(datetime)))
 
+## Write CSV
+vroom_write(kaggle_submission, file = "./LinearPreds.csv", delim = ",")
 
-kaggle_submission <- bike_predictions %>%
-bind_cols(., test) %>% #Bind predictions with test data3
-  select(datetime, .pred) %>% #Just keep datetime and prediction variables4
-  rename(count=.pred) %>% #rename pred to count (for submission to Kaggle)5
-  mutate(count=pmax(0, count)) %>% #pointwise max of (0, prediction)6
-  mutate(datetime=as.character(format(datetime))) #needed for right format to Kaggle7
+head(bikeshare)
 
-## Write out the file
-vroom_write(x=kaggle_submission, file="./LinearPreds.csv", delim=",")
