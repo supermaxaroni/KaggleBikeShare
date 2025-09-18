@@ -11,6 +11,8 @@ library(ggcorrplot)
 library(lubridate)
 library(glmnet)
 
+L <- 10
+K <- 10
 bikeshare <- vroom("GItHub/KaggleBikeShare/train.csv")
 test      <- vroom("GItHub/KaggleBikeShare/test.csv")
 
@@ -47,16 +49,49 @@ bike_rec <- recipe(count ~ temp + humidity + windspeed + season + weather +
   step_rm(datetime)
 
 ## Penalized regression model
-preg_model <- linear_reg(penalty=.05, mixture=.3) %>% #Set model and tuning
+preg_model <- linear_reg(penalty=tune(), mixture=tune()) %>% #Set model and tuning
   set_engine("glmnet") # Function to fit in R
 preg_wf <- workflow() %>%
 add_recipe(bike_rec) %>%
 add_model(preg_model)
-preg_fit <- fit(preg_wf, data=bikeshare)
-bike_predictions <-predict(preg_fit, new_data=test) %>%
-  mutate(.pred = exp(.pred)) %>%       # back-transform
-  mutate(.pred = pmax(0, .pred)) %>%   # enforce non-negative
-  rename(count = .pred)
+
+grid_of_tuning_params <- grid_regular(penalty(),
+                                      mixture(),
+                                      levels = L)
+
+folds <- vfold_cv(bikeshare, v = K, repeats = 1)
+
+CV_results <- preg_wf %>%
+tune_grid(resamples=folds,
+          grid=grid_of_tuning_params,
+          metrics=metric_set(rmse, mae)) #Or leave metrics NULL
+
+## Plot Results (example)
+collect_metrics(CV_results) %>%
+  filter(.metric == "rmse") %>%
+  ggplot(aes(x = penalty, y = mean, color = factor(mixture))) +
+  geom_line()
+
+
+## Find Best Tuning Parameters
+bestTune <- CV_results %>%
+select_best(metric="rmse")
+
+final_wf <- preg_wf %>%
+  finalize_workflow(bestTune) %>%
+  fit(data=bikeshare)
+
+final <- final_wf %>%
+  predict(new_data = test) %>%
+  mutate(count = exp(.pred)) %>%       # back-transform
+  mutate(count = pmax(0, count)) %>%   # enforce non-negative
+  select(count)
+
+#preg_fit <- fit(preg_wf, data=bikeshare)
+#bike_predictions <-predict(preg_fit, new_data=test) %>%
+#  mutate(.pred = exp(.pred)) %>%       # back-transform
+#  mutate(.pred = pmax(0, .pred)) %>%   # enforce non-negative
+#  rename(count = .pred)
 
 
 # Model
@@ -79,9 +114,13 @@ bike_predictions <-predict(preg_fit, new_data=test) %>%
 
 # Kaggle submission
 kaggle_submission <- bind_cols(
-  test %>% 
-  select(datetime),bike_predictions) %>%
+  test %>% select(datetime),
+  final
+) %>%
   mutate(datetime = as.character(format(datetime)))
+
+vroom_write(kaggle_submission, file = "./LinearPreds.csv", delim = ",")
+
 
 vroom_write(kaggle_submission, file = "./LinearPreds.csv", delim = ",")
 
