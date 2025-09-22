@@ -11,6 +11,7 @@ library(ggcorrplot)
 library(lubridate)
 library(glmnet)
 library(rpart)
+library(ranger)
 
 L <- 3
 K <- 3
@@ -50,19 +51,20 @@ bike_rec <- recipe(count ~ temp + humidity + windspeed + season + weather +
   step_rm(datetime)
 
 ## Penalized regression model
-preg_model <- decision_tree(tree_depth = tune(),
-                                      cost_complexity = tune(),
-                                      min_n=tune()) %>% #Type of model
-  set_engine("rpart") %>% # What R function to use
+preg_model <- rand_forest(
+  mtry  = tune(),       # number of predictors to try at each split
+  min_n = tune(),       # minimum data points in a node
+  trees = 1000          # number of trees to grow
+) %>%
+  set_engine("ranger") %>% # What R function to use
   set_mode("regression")
 preg_wf <- workflow() %>%
 add_recipe(bike_rec) %>%
 add_model(preg_model)
 
 grid_of_tuning_params <- grid_regular(
-  tree_depth(),
+  mtry(range=c(1,12)),
   min_n(),
-  cost_complexity(),
   levels = L
 )
 
@@ -77,7 +79,7 @@ tune_grid(resamples=folds,
 ## Plot Results (example)
 collect_metrics(CV_results) %>%
   filter(.metric == "rmse") %>%
-  ggplot(aes(x = tree_depth, y = mean, color = factor(min_n))) +
+  ggplot(aes(x = mtry, y = mean, color = factor(min_n))) +
   geom_line()
 
 
