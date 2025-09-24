@@ -12,6 +12,9 @@ library(lubridate)
 library(glmnet)
 library(rpart)
 library(ranger)
+library(bonsai)
+library(dbarts)
+library(lightgbm)
 
 L <- 3
 K <- 3
@@ -51,51 +54,51 @@ bike_rec <- recipe(count ~ temp + humidity + windspeed + season + weather +
   step_rm(datetime)
 
 ## Penalized regression model
-preg_model <- rand_forest(
-  mtry  = tune(),       # number of predictors to try at each split
-  min_n = tune(),       # minimum data points in a node
-  trees = 1000          # number of trees to grow
-) %>%
-  set_engine("ranger") %>% # What R function to use
-  set_mode("regression")
-preg_wf <- workflow() %>%
-add_recipe(bike_rec) %>%
-add_model(preg_model)
+#preg_model <- rand_forest(
+ # mtry  = tune(),       # number of predictors to try at each split
+  #min_n = tune(),       # minimum data points in a node
+  #trees = 1000          # number of trees to grow
+#) %>%
+#  set_engine("ranger") %>% # What R function to use
+#  set_mode("regression")
+#preg_wf <- workflow() %>%
+#add_recipe(bike_rec) %>%
+#add_model(preg_model)
 
-grid_of_tuning_params <- grid_regular(
-  mtry(range=c(1,12)),
-  min_n(),
-  levels = L
-)
+#grid_of_tuning_params <- grid_regular(
+#  mtry(range=c(1,12)),
+#  min_n(),
+#  levels = L
+#)
 
 
-folds <- vfold_cv(bikeshare, v = K, repeats = 1)
+#folds <- vfold_cv(bikeshare, v = K, repeats = 1)
 
-CV_results <- preg_wf %>%
-tune_grid(resamples=folds,
-          grid=grid_of_tuning_params,
-          metrics=metric_set(rmse, mae)) #Or leave metrics NULL
+#CV_results <- preg_wf %>%
+#tune_grid(resamples=folds,
+#          grid=grid_of_tuning_params,
+#          metrics=metric_set(rmse, mae)) #Or leave metrics NULL
 
 ## Plot Results (example)
-collect_metrics(CV_results) %>%
-  filter(.metric == "rmse") %>%
-  ggplot(aes(x = mtry, y = mean, color = factor(min_n))) +
-  geom_line()
+#collect_metrics(CV_results) %>%
+#  filter(.metric == "rmse") %>%
+#  ggplot(aes(x = mtry, y = mean, color = factor(min_n))) +
+#  geom_line()
 
 
 ## Find Best Tuning Parameters
-bestTune <- CV_results %>%
-select_best(metric="rmse")
+#bestTune <- CV_results %>%
+#select_best(metric="rmse")
 
-final_wf <- preg_wf %>%
-  finalize_workflow(bestTune) %>%
-  fit(data=bikeshare)
+#final_wf <- preg_wf %>%
+#  finalize_workflow(bestTune) %>%
+#  fit(data=bikeshare)
 
-final <- final_wf %>%
-  predict(new_data = test) %>%
-  mutate(count = exp(.pred)) %>%       # back-transform
-  mutate(count = pmax(0, count)) %>%   # enforce non-negative
-  select(count)
+#final <- final_wf %>%
+#  predict(new_data = test) %>%
+#  mutate(count = exp(.pred)) %>%       # back-transform
+#  mutate(count = pmax(0, count)) %>%   # enforce non-negative
+#  select(count)
 
 #preg_fit <- fit(preg_wf, data=bikeshare)
 #bike_predictions <-predict(preg_fit, new_data=test) %>%
@@ -123,9 +126,54 @@ final <- final_wf %>%
 #  rename(count = .pred)
 
 # Kaggle submission
+
+bart_model <- parsnip::bart() %>% # BART figures out depth and learn_rate9
+  set_engine("dbarts") %>% # might need to install10
+  set_mode("regression")
+
+bart_wf <- workflow() %>%
+  add_recipe(bike_rec) %>%
+  add_model(bart_model)
+
+bart_grid <- grid_regular(
+  trees(range = c(20, 200)), # number of trees
+  levels = L
+)
+
+bart_results <- bart_wf %>%
+  tune_grid(
+    resamples = folds,
+    grid = bart_grid,
+    metrics = metric_set(rmse, mae)
+  )
+
+best_bart <- bart_results %>%
+  select_best(metric = "rmse")
+
+final_bart_wf <- bart_wf %>%
+  finalize_workflow(best_bart) %>%
+  fit(data = bikeshare)
+
+final_bart <- final_bart_wf %>%
+  predict(new_data = test) %>%
+  mutate(count = exp(.pred)) %>%
+  mutate(count = pmax(0, count)) %>%
+  select(count)
+
+
+boost_model <- boost_tree(tree_depth=tune(),
+                          trees=tune(),
+                          learn_rate=tune()) %>%
+  set_engine("lightgbm") %>% #or "xgboost" but lightgbm is faster
+  set_mode("regression")
+
+boost_wf <- workflow() %>%
+  add_recipe(bike_rec) %>%
+  add_model(boost_model)
+
 kaggle_submission <- bind_cols(
   test %>% select(datetime),
-  final
+  final_bart
 ) %>%
   mutate(datetime = as.character(format(datetime)))
 
