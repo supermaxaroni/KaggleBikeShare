@@ -1,133 +1,95 @@
+# Clean workspace
+rm(list = ls())
+
+# Libraries ---------------------------------------------------------------
 library(tidyverse)
 library(tidymodels)
 library(vroom)
-library(patchwork)
-library(dplyr)
-library(ggplot2)
-library(car)
-library(corrplot)
-library(ggcorrplot)
-library(lubridate)
-library(glmnet)
-library(rpart)
-library(ranger)
-library(bonsai)
-library(dbarts)
-library(lightgbm)
-library(agua) 
+library(ggmosaic)
+library(embed)
+library(doParallel)
 
-h2o::h2o.init()
+# Parallel processing -----------------------------------------------------
+registerDoParallel(cores = parallel::detectCores())
 
-L <- 3
-K <- 3
+ggg_train <- vroom("./train.csv", show_col_types = FALSE) %>%
+  mutate(ACTION = as.factor(ACTION))
+ggg_test <- vroom("./test.csv", show_col_types = FALSE)
 
-# --- Load data ---
-bikeshare <- vroom("GItHub/KaggleBikeShare/train.csv")
-test      <- vroom("GItHub/KaggleBikeShare/test.csv")
+my_recipe <- recipe(ACTION ~ ., data=amazon_train) %>%
+  step_mutate_at(all_numeric_predictors(), fn = factor) %>% # turn all numeric features into factors
+  step_other(all_nominal_predictors(), threshold = .01) %>% # combines categorical values that occur <5% into an "other" value
+  step_dummy(all_nominal_predictors()) %>% # dummy variable encoding
+  step_lencode_mixed(all_nominal_predictors(), outcome = vars(target_var)) #target encoding
+# also step_lencode_glm() and step_lencode_bayes()
 
-# --- Transform training data ---
-bikeshare <- bikeshare %>%
-  mutate(count = log(count))
 
-# --- Recipe ---
-bike_rec <- recipe(count ~ temp + humidity + windspeed + season + weather +
-                     holiday + workingday + datetime,
-                   data = bikeshare) %>%
-  step_mutate(weather = ifelse(weather == 4, 3, weather)) %>%
-  step_mutate(
-    season     = as.factor(season),
-    holiday    = as.factor(holiday),
-    workingday = as.factor(workingday),
-    weather    = as.factor(weather)
-  ) %>%
-  step_mutate(hour = hour(datetime)) %>%
-  step_mutate(hour_sin = sin(2 * pi * hour / 24),
-              hour_cos = cos(2 * pi * hour / 24)) %>%
-  step_rm(hour) %>%
-  step_mutate(sunny = ifelse(weather == 1 & between(hour(datetime), 5, 20), 1, 0),
-              sunny = as.factor(sunny)) %>%
-  step_dummy(all_nominal_predictors()) %>%
-  step_poly(temp, degree = 2) %>%
-  step_normalize(all_numeric_predictors()) %>%
-  step_rm(datetime)
+# NOTE: some of these step functions are not appropriate to use together
 
-# ------------------------
-# Commented-out models
-# ------------------------
+# apply the recipe to your data
+prep <- prep(my_recipe)
+baked <- bake(prep, new_data = amazon_train)
 
-## Example Random Forest (not used)
-# preg_model <- rand_forest(
-#   mtry  = tune(),
-#   min_n = tune(),
-#   trees = 1000
-# ) %>%
-#   set_engine("ranger") %>%
-#   set_mode("regression")
+## recipe
 
-## Example BART (not used)
-# bart_model <- parsnip::bart() %>%
-#   set_engine("dbarts") %>%
-#   set_mode("regression")
-# bart_wf <- workflow() %>%
-#   add_recipe(bike_rec) %>%
-#   add_model(bart_model)
-# bart_grid <- grid_regular(
-#   trees(range = c(20, 200)), 
-#   levels = L
-# )
-# folds <- vfold_cv(bikeshare, v = K, repeats = 1)
-# bart_results <- bart_wf %>%
-#   tune_grid(
-#     resamples = folds,
-#     grid = bart_grid,
-#     metrics = metric_set(rmse, mae)
-#   )
-# best_bart <- bart_results %>% select_best(metric = "rmse")
-# final_bart_wf <- bart_wf %>%
-#   finalize_workflow(best_bart) %>%
-#   fit(data = bikeshare)
-# final_bart <- final_bart_wf %>%
-#   predict(new_data = test) %>%
-#   mutate(count = exp(.pred)) %>%
-#   mutate(count = pmax(0, count)) %>%
-#   select(count)
+my_recipe <- recipe(ACTION ~ ., data=amazon_train) %>%
+  step_mutate_at(all_numeric_predictors(), fn = factor) %>% # turn all numeric features into factors
+  #step_other(all_nominal_predictors(), threshold = .001) %>% 
+  step_lencode_mixed(all_nominal_predictors(), outcome = vars(ACTION))
 
-## Example LightGBM Boosting (not used)
-# boost_model <- boost_tree(tree_depth=tune(),
-#                           trees=tune(),
-#                           learn_rate=tune()) %>%
-#   set_engine("lightgbm") %>%
-#   set_mode("regression")
-# boost_wf <- workflow() %>%
-#   add_recipe(bike_rec) %>%
-#   add_model(boost_model)
+## Create a workflow with model & recipe
 
-# ------------------------
-# Active Model: h2o AutoML
-# ------------------------
+my_mod_rf <- rand_forest(mtry = tune(),
+                         min_n=tune(),
+                         trees=500) %>%
+  set_engine("ranger") %>%
+  set_mode("classification")
 
-auto_model <- auto_ml() %>%
-  set_engine("h2o", max_runtime_secs = 360, max_models = 10) %>%
-  set_mode("regression")
 
-automl_wf <- workflow() %>%
-  add_recipe(bike_rec) %>%
-  add_model(auto_model) %>%
-  fit(data = bikeshare)   # use bikeshare directly
+amazon_workflow <- workflow() %>%
+  add_recipe(my_recipe) %>%
+  add_model(my_mod_rf)
 
-# --- Predict with h2o AutoML ---
-final_h2o <- automl_wf %>%
-  predict(new_data = test) %>%
-  mutate(count = exp(.pred)) %>%       # back-transform
-  mutate(count = pmax(0, count)) %>%   # enforce non-negative
-  select(count)
+## Set up grid of tuning values
 
-# --- Kaggle submission ---
-kaggle_submission <- bind_cols(
-  test %>% select(datetime),
-  final_h2o
-) %>%
-  mutate(datetime = as.character(format(datetime)))
+tuning_grid <- grid_regular(mtry(range = c(1,(ncol(amazon_train)-1))),
+                            min_n(),
+                            levels = 3)
 
-vroom_write(kaggle_submission, file = "./H2O_AutoML_Preds.csv", delim = ",")
-head(kaggle_submission)
+## Set up K-fold CV
+
+folds <- vfold_cv(amazon_train, v = 3, repeats=1)
+
+## Find best tuning parameters
+
+CV_results <- amazon_workflow %>%
+  tune_grid(resamples=folds,
+            grid=tuning_grid,
+            metrics=metric_set(roc_auc))
+
+best_tune_rf <- CV_results %>%
+  select_best(metric = "roc_auc")
+
+## Finalize workflow and predict
+
+final_wf <- amazon_workflow %>%
+  finalize_workflow(best_tune_rf) %>%
+  fit(data=amazon_train)
+
+amazon_predictions_rf <- final_wf %>% predict(new_data=amazon_test,
+                                              type="prob")
+
+ap_rf <- amazon_predictions_rf %>% #This predicts
+  bind_cols(., amazon_test) %>% #Bind predictions with test data
+  select(id, .pred_1) %>% #Just keep datetime and predictions
+  rename(Action=.pred_1)
+
+
+
+vroom_write(x=ap_rf, file="rfamazon.csv", delim=",")
+
+write.csv(ap_rf, file = "amazonrandomforestsfinal.csv", quote = FALSE, row.names = FALSE)
+
+save(file="./rfamazon.csv", list=c("best_tune_rf", "amazon_predictions_rf"))
+
+
